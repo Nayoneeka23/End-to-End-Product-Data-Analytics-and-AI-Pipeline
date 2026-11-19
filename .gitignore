@@ -3,3 +3,6 @@ __pycache__/
 .ipynb_checkpoints/
 .vscode/
 sephora_products.index
+CLAUDE.md
+.claude/
+INTERVIEW_NOTES.md
