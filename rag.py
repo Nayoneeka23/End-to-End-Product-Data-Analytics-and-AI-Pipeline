@@ -3,7 +3,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 import requests
-
+import json
 
 # ---------------------------------------------------------
 # 1. Load Sephora product dataset
@@ -245,7 +245,8 @@ ANSWER:
         json={
             "model": "mistral",
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "keep_alive": "2h"
         },
         timeout=120
     )
@@ -254,10 +255,71 @@ ANSWER:
 
     return response.json()["response"]
 
+# ---------------------------------------------------------
+# 8. Generate stream answer using Mistral
+# ---------------------------------------------------------
+
+
+def stream_answer(query, retrieved_products,
+                  max_price=None, min_rating=None, brand=None):
+    """Same as generate_answer, but yields the answer piece by piece."""
+
+    context = "\n\n---\n\n".join(retrieved_products["document"].tolist())
+
+    filter_text = []
+    if brand is not None:
+        filter_text.append(f"Brand: {brand}")
+    if max_price is not None:
+        filter_text.append(f"Maximum price: ${max_price:.2f}")
+    if min_rating is not None:
+        filter_text.append(f"Minimum rating: {min_rating}")
+    filters = "\n".join(
+        filter_text) if filter_text else "No additional filters."
+
+    prompt = f"""
+You are a beauty product recommendation assistant.
+
+Answer the user's question using ONLY the Sephora product information
+provided in the context below.
+
+Important rules:
+- Recommend only products present in the provided context.
+- Do not invent products, prices, ratings, ingredients or benefits.
+- Respect all active filters.
+- If information is marked "Not available", do not invent it.
+- Explain briefly why each recommendation matches the user's request.
+- If the available information is insufficient, clearly say so.
+- Keep the answer concise and easy to understand.
+
+USER QUESTION:
+{query}
+
+ACTIVE FILTERS:
+{filters}
+
+SEPHORA PRODUCT CONTEXT:
+{context}
+
+ANSWER:
+"""
+
+    response = requests.post(
+        "http://localhost:11434/api/generate",
+        json={"model": "mistral", "prompt": prompt, "stream": True,
+              "keep_alive": -1, "options": {"num_predict": 250}},
+        stream=True, timeout=120,
+    )
+    response.raise_for_status()
+
+    for line in response.iter_lines():
+        if line:
+            chunk = json.loads(line)
+            yield chunk.get("response", "")
 
 # ---------------------------------------------------------
 # 8. Helper function for optional numeric filters
 # ---------------------------------------------------------
+
 
 def get_optional_number(
     prompt,
@@ -348,11 +410,17 @@ def get_brand():
 # 10. Interactive RAG system
 # ---------------------------------------------------------
 
-print("\n" + "=" * 60)
-print("SEPHORA AI PRODUCT ASSISTANT")
-print("=" * 60)
+# Everything below only runs when this file is started directly
+# (python rag.py). When app.py imports this file, the functions above
+# are reused but this interactive loop is skipped.
 
-print("""
+if __name__ == "__main__":
+
+    print("\n" + "=" * 60)
+    print("SEPHORA AI PRODUCT ASSISTANT")
+    print("=" * 60)
+
+    print("""
 Ask a question about Sephora products.
 
 Examples:
@@ -371,151 +439,150 @@ Press Enter to skip any filter.
 Type 'exit' to stop.
 """)
 
+    while True:
 
-while True:
+        # -------------------------------------------------
+        # User question
+        # -------------------------------------------------
 
-    # -----------------------------------------------------
-    # User question
-    # -----------------------------------------------------
+        query = input(
+            "\nAsk a Sephora product question:\n> "
+        ).strip()
 
-    query = input(
-        "\nAsk a Sephora product question:\n> "
-    ).strip()
+        if query.lower() in [
+            "exit",
+            "quit",
+            "q"
+        ]:
+            print("\nGoodbye!")
+            break
 
-    if query.lower() in [
-        "exit",
-        "quit",
-        "q"
-    ]:
-        print("\nGoodbye!")
-        break
+        if not query:
+            print(
+                "\nPlease enter a question."
+            )
+            continue
 
-    if not query:
-        print(
-            "\nPlease enter a question."
-        )
-        continue
-
-    # -----------------------------------------------------
-    # Optional filters
-    # -----------------------------------------------------
-
-    print(
-        "\nOptional filters "
-        "(press Enter to skip):"
-    )
-
-    brand = get_brand()
-
-    max_price = get_optional_number(
-        "Maximum price ($): ",
-        min_value=0
-    )
-
-    min_rating = get_optional_number(
-        "Minimum rating (0-5): ",
-        min_value=0,
-        max_value=5
-    )
-
-    # -----------------------------------------------------
-    # Retrieve + filter
-    # -----------------------------------------------------
-
-    print(
-        "\nSearching Sephora products..."
-    )
-
-    results = retrieve_products(
-        query=query,
-        max_price=max_price,
-        min_rating=min_rating,
-        brand=brand,
-        final_k=5,
-        candidate_k=200
-    )
-
-    # -----------------------------------------------------
-    # No matches
-    # -----------------------------------------------------
-
-    if results.empty:
+        # -------------------------------------------------
+        # Optional filters
+        # -------------------------------------------------
 
         print(
-            "\nNo suitable products were found "
-            "for those search conditions."
+            "\nOptional filters "
+            "(press Enter to skip):"
         )
+
+        brand = get_brand()
+
+        max_price = get_optional_number(
+            "Maximum price ($): ",
+            min_value=0
+        )
+
+        min_rating = get_optional_number(
+            "Minimum rating (0-5): ",
+            min_value=0,
+            max_value=5
+        )
+
+        # -------------------------------------------------
+        # Retrieve + filter
+        # -------------------------------------------------
 
         print(
-            "Try changing the brand, increasing "
-            "the maximum price, lowering the "
-            "minimum rating, or changing your query."
+            "\nSearching Sephora products..."
         )
 
-        continue
-
-    # -----------------------------------------------------
-    # Display retrieved products
-    # -----------------------------------------------------
-
-    print("\nTop retrieved products:\n")
-
-    display_columns = [
-        "product_name",
-        "brand_name",
-        "primary_category",
-        "secondary_category",
-        "price_usd",
-        "rating",
-        "similarity_score"
-    ]
-
-    print(
-        results[
-            display_columns
-        ].to_string(index=False)
-    )
-
-    # -----------------------------------------------------
-    # Generate answer using Mistral
-    # -----------------------------------------------------
-
-    print(
-        "\nGenerating AI recommendation...\n"
-    )
-
-    try:
-
-        answer = generate_answer(
+        results = retrieve_products(
             query=query,
-            retrieved_products=results,
             max_price=max_price,
             min_rating=min_rating,
-            brand=brand
+            brand=brand,
+            final_k=5,
+            candidate_k=200
         )
 
-        print("=" * 60)
-        print("SEPHORA AI RESPONSE")
-        print("=" * 60)
+        # -------------------------------------------------
+        # No matches
+        # -------------------------------------------------
 
-        print("\n" + answer)
+        if results.empty:
 
-    except requests.exceptions.ConnectionError:
+            print(
+                "\nNo suitable products were found "
+                "for those search conditions."
+            )
+
+            print(
+                "Try changing the brand, increasing "
+                "the maximum price, lowering the "
+                "minimum rating, or changing your query."
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # Display retrieved products
+        # -------------------------------------------------
+
+        print("\nTop retrieved products:\n")
+
+        display_columns = [
+            "product_name",
+            "brand_name",
+            "primary_category",
+            "secondary_category",
+            "price_usd",
+            "rating",
+            "similarity_score"
+        ]
 
         print(
-            "\nERROR: Could not connect to Ollama. "
-            "Make sure Ollama is running."
+            results[
+                display_columns
+            ].to_string(index=False)
         )
 
-    except requests.exceptions.Timeout:
+        # -------------------------------------------------
+        # Generate answer using Mistral
+        # -------------------------------------------------
 
         print(
-            "\nERROR: Mistral took too long to respond."
+            "\nGenerating AI recommendation...\n"
         )
 
-    except requests.exceptions.RequestException as error:
+        try:
 
-        print(
-            "\nERROR while communicating with Ollama:",
-            error
-        )
+            answer = generate_answer(
+                query=query,
+                retrieved_products=results,
+                max_price=max_price,
+                min_rating=min_rating,
+                brand=brand
+            )
+
+            print("=" * 60)
+            print("SEPHORA AI RESPONSE")
+            print("=" * 60)
+
+            print("\n" + answer)
+
+        except requests.exceptions.ConnectionError:
+
+            print(
+                "\nERROR: Could not connect to Ollama. "
+                "Make sure Ollama is running."
+            )
+
+        except requests.exceptions.Timeout:
+
+            print(
+                "\nERROR: Mistral took too long to respond."
+            )
+
+        except requests.exceptions.RequestException as error:
+
+            print(
+                "\nERROR while communicating with Ollama:",
+                error
+            )
