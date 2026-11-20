@@ -313,14 +313,15 @@ with tab_ai:
             # Then try to get Mistral's answer.
             st.subheader("AI recommendation")
             try:
-                answer = rag.generate_answer(
-                    query=query,
-                    retrieved_products=results,
-                    max_price=price_filter,
-                    min_rating=rating_filter,
-                    brand=brand_filter,
+                st.write_stream(
+                    rag.stream_answer(
+                        query=query,
+                        retrieved_products=results,
+                        max_price=price_filter,
+                        min_rating=rating_filter,
+                        brand=brand_filter,
+                    )
                 )
-                st.write(answer)
             except Exception:
                 st.info(
                     "The products above are ready, but the AI explanation "
